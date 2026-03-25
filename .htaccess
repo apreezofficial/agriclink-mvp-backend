@@ -1,0 +1,26 @@
+# AgriMarket API URL Routing
+# This file handles URL rewriting for the PHP API
+
+# Enable RewriteEngine
+RewriteEngine On
+
+# If the request is for a real file or directory, serve it directly
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+
+# Route all API requests through index.php
+RewriteRule ^api/auth(/.*)?$ auth/index.php [L]
+RewriteRule ^api/listings(/.*)?$ listings/index.php [L]
+RewriteRule ^api/orders(/.*)?$ orders/index.php [L]
+RewriteRule ^api/wallet(/.*)?$ wallet/index.php [L]
+RewriteRule ^api/users(/.*)?$ users/index.php [L]
+RewriteRule ^api/notifications(/.*)?$ notifications/index.php [L]
+RewriteRule ^api/admin(/.*)?$ admin/index.php [L]
+RewriteRule ^api/integrations(/.*)?$ integrations.php [L]
+
+# Handle root API request
+RewriteRule ^api/?$ index.php [L]
+
+# Return 404 for unmatched routes
+RewriteRule ^ - [R=404]
