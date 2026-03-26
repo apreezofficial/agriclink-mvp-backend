@@ -5,6 +5,9 @@
  * Routes: POST /api/auth/register, POST /api/auth/login, GET /api/auth/me, etc.
  */
 
+// Include CORS headers FIRST
+require_once __DIR__ . '/../cors.php';
+
 require_once __DIR__ . '/../config.php';
 
 $method = $_SERVER['REQUEST_METHOD'];

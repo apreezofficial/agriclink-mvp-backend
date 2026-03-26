@@ -1,3 +1,4 @@
+<?php
 /**
  * AgriMarket API - Main Router
  * 
@@ -5,17 +6,8 @@
  * Uses pretty URLs: /api/auth/register, /api/listings, etc.
  */
 
-// Set CORS headers
-header('Access-Control-Allow-Origin: *');
-header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
-header('Access-Control-Allow-Headers: Content-Type, Authorization');
-header('Content-Type: application/json');
-
-// Handle preflight
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-    http_response_code(200);
-    exit;
-}
+// Include CORS headers FIRST
+require_once __DIR__ . '/cors.php';
 
 // Get the request URI and remove query string
 $requestUri = $_SERVER['REQUEST_URI'];
@@ -26,7 +18,7 @@ $requestUri = trim($requestUri, '/');
 
 // Route to the correct API
 if (strpos($requestUri, 'api/auth') === 0) {
-    require_once __DIR__ . '/auth/register.php';
+    require_once __DIR__ . '/auth/index.php';
 } elseif (strpos($requestUri, 'api/listings') === 0) {
     require_once __DIR__ . '/listings/index.php';
 } elseif (strpos($requestUri, 'api/orders') === 0) {
@@ -40,7 +32,7 @@ if (strpos($requestUri, 'api/auth') === 0) {
 } elseif (strpos($requestUri, 'api/admin') === 0) {
     require_once __DIR__ . '/admin/index.php';
 } elseif (strpos($requestUri, 'api/integrations') === 0) {
-    require_once __DIR__ . '/integrations/index.php';
+    require_once __DIR__ . '/integrations.php';
 } else {
     http_response_code(404);
     echo json_encode(['success' => false, 'error' => 'API endpoint not found']);

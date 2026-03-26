@@ -1,13 +1,24 @@
-# AgriMarket API URL Routing
-# This file handles URL rewriting for the PHP API
+# AgriMarket API URL Routing and CORS
+# This file handles URL rewriting and CORS headers for the PHP API
 
 # Enable RewriteEngine
 RewriteEngine On
+
+# CORS Headers for all requests
+Header set Access-Control-Allow-Origin "*"
+Header set Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+Header set Access-Control-Allow-Headers "Content-Type, Authorization, X-Requested-With, Accept, Origin"
+Header set Access-Control-Expose-Headers "Content-Type, Authorization"
+Header set Access-Control-Max-Age "86400"
 
 # If the request is for a real file or directory, serve it directly
 RewriteCond %{REQUEST_FILENAME} -f [OR]
 RewriteCond %{REQUEST_FILENAME} -d
 RewriteRule ^ - [L]
+
+# Handle OPTIONS preflight
+RewriteCond %{REQUEST_METHOD} OPTIONS
+RewriteRule ^api/(.*)$ $1 [R=200,L]
 
 # Route all API requests through index.php
 RewriteRule ^api/auth(/.*)?$ auth/index.php [L]

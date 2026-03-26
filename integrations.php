@@ -2,23 +2,34 @@
 /**
  * AgriMarket API - Third-Party Integrations
  * 
- * Mock implementations for third-party services:
- * - Payment Gateway (Flutterwave/Paystack style)
- * - SMS Notifications (Twilio style)
- * - Weather API
- * - Crop Price API
- * - Bank Account Verification
+ * Third-party integrations.
+ * Interswitch sandbox is used for payment and bank verification flows.
  */
 
+// Include CORS headers FIRST
 require_once __DIR__ . '/config.php';
+
+ini_set('display_errors', '0');
+ini_set('log_errors', '1');
 
 $method = $_SERVER['REQUEST_METHOD'];
 $data = json_decode(file_get_contents('php://input'), true) ?? [];
 
 // Route handling
 $uri = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
-$uri = str_replace('/api/integrations/', '', $uri);
-$uriParts = explode('/', $uri);
+$scriptName = str_replace('\\', '/', $_SERVER['SCRIPT_NAME'] ?? '');
+$requestPath = trim(str_replace('\\', '/', $uri), '/');
+$scriptPath = trim($scriptName, '/');
+
+if ($scriptPath !== '' && str_starts_with($requestPath, $scriptPath)) {
+    $requestPath = trim(substr($requestPath, strlen($scriptPath)), '/');
+} elseif (str_contains($requestPath, 'integrations.php')) {
+    $requestPath = trim(substr($requestPath, strpos($requestPath, 'integrations.php') + strlen('integrations.php')), '/');
+} elseif (str_contains($requestPath, 'api/integrations/')) {
+    $requestPath = trim(substr($requestPath, strpos($requestPath, 'api/integrations/') + strlen('api/integrations/')), '/');
+}
+
+$uriParts = $requestPath === '' ? [] : explode('/', $requestPath);
 
 switch ($method) {
     case 'GET':
@@ -29,6 +40,8 @@ switch ($method) {
                 getCropPrices();
             } elseif ($uriParts[0] === 'exchange-rates') {
                 getExchangeRates();
+            } elseif ($uriParts[0] === 'payments' && isset($uriParts[1]) && $uriParts[1] === 'callback') {
+                handlePaymentCallback();
             } else {
                 errorResponse('Endpoint not found', 404);
             }
@@ -52,6 +65,7 @@ switch ($method) {
                 sendEmail();
             }
         }
+        errorResponse('Endpoint not found', 404);
         break;
     default:
         errorResponse('Method not allowed', 405);
@@ -292,7 +306,7 @@ function getExchangeRates() {
 
 /**
  * POST /api/integrations/payments/initialize
- * Initialize a payment transaction
+ * Initialize a payment transaction with Interswitch
  */
 function initializePayment() {
     global $data;
@@ -304,32 +318,62 @@ function initializePayment() {
     $customerEmail = sanitizeInput($data['customer_email']);
     $customerName = sanitizeInput($data['customer_name'] ?? '');
     $metadata = $data['metadata'] ?? [];
+    $reference = sanitizeInput($data['reference'] ?? ('AGR-' . strtoupper(bin2hex(random_bytes(10)))));
+    $redirectUrl = $data['redirect_url'] ?? INTERSWITCH_REDIRECT_URL;
     
     if ($amount <= 0) {
         errorResponse('Amount must be greater than 0');
     }
-    
-    // Generate payment reference
-    $reference = 'AGR-' . strtoupper(bin2hex(random_bytes(12)));
-    
-    // Mock payment link (in production, integrate with Flutterwave/Paystack)
-    $response = [
+
+    $payload = [
+        'merchantCode' => INTERSWITCH_MERCHANT_CODE,
+        'payItemId' => $data['pay_item_id'] ?? '101',
+        'siteRedirectUrl' => $redirectUrl,
+        'amount' => (int)round($amount * 100),
+        'currency' => $currency,
+        'txnRef' => $reference,
+        'customerInfor' => [
+            'customerEmail' => $customerEmail,
+            'customerName' => $customerName ?: $customerEmail,
+        ],
+        'requestParams' => [
+            'terminalId' => INTERSWITCH_TERMINAL_ID,
+            'narration' => $data['narration'] ?? 'AgriMarket payment',
+        ],
+    ];
+
+    if (!empty($metadata)) {
+        $payload['metadata'] = $metadata;
+    }
+
+    $response = interswitchAuthorizedJsonRequest(
+        'POST',
+        INTERSWITCH_API_BASE_URL . '/quickteller/transactions',
+        $payload
+    );
+
+    if (!$response['success']) {
+        errorResponse('Interswitch payment initialization failed', 502);
+    }
+
+    $result = is_array($response['data']) ? $response['data'] : [];
+
+    successResponse('Payment initialized', [
+        'provider' => 'interswitch',
+        'environment' => INTERSWITCH_ENV,
         'reference' => $reference,
         'amount' => $amount,
         'currency' => $currency,
-        'status' => 'pending',
-        'checkout_url' => "https://checkout.agrimarket.com/$reference",
-        'qr_code' => "https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=" . urlencode($reference),
-        'expires_at' => date('c', strtotime('+30 minutes')),
-        'metadata' => $metadata
-    ];
-    
-    successResponse('Payment initialized', $response);
+        'status' => $result['paymentStatus'] ?? 'pending',
+        'checkout_url' => $result['paymentLink'] ?? ($result['checkoutUrl'] ?? null),
+        'redirect_url' => $redirectUrl,
+        'gateway_response' => $result,
+    ]);
 }
 
 /**
  * POST /api/integrations/payments/verify
- * Verify a payment transaction
+ * Verify a payment transaction with Interswitch
  */
 function verifyPayment() {
     global $data;
@@ -337,31 +381,34 @@ function verifyPayment() {
     validateRequired(['reference'], $data);
     
     $reference = sanitizeInput($data['reference']);
-    
-    // Mock verification (in production, call payment gateway API)
-    // Simulate random success/failure based on reference hash
-    $hash = crc32($reference);
-    $isSuccessful = $hash % 10 !== 0; // 90% success rate
-    
-    if ($isSuccessful) {
-        $response = [
-            'reference' => $reference,
-            'status' => 'successful',
-            'amount' => rand(1000, 100000),
-            'currency' => 'NGN',
-            'transaction_id' => 'TXN-' . strtoupper(bin2hex(random_bytes(8))),
-            'processor_response' => 'Approved',
-            'verified_at' => date('c')
-        ];
-        successResponse('Payment verified', $response);
-    } else {
-        errorResponse('Payment verification failed', 400);
+
+    $response = interswitchAuthorizedJsonRequest(
+        'GET',
+        INTERSWITCH_API_BASE_URL . '/quickteller/transactions/' . rawurlencode($reference)
+    );
+
+    if (!$response['success']) {
+        errorResponse('Payment verification failed with Interswitch', 502);
     }
+
+    $result = is_array($response['data']) ? $response['data'] : [];
+
+    successResponse('Payment verified', [
+        'provider' => 'interswitch',
+        'reference' => $reference,
+        'status' => strtolower((string)($result['paymentStatus'] ?? $result['status'] ?? 'unknown')),
+        'amount' => isset($result['amount']) ? ((float)$result['amount'] / 100) : null,
+        'currency' => $result['currency'] ?? 'NGN',
+        'transaction_id' => $result['transactionRef'] ?? ($result['transactionId'] ?? null),
+        'processor_response' => $result['responseDescription'] ?? ($result['message'] ?? 'Processed by Interswitch'),
+        'verified_at' => date('c'),
+        'gateway_response' => $result,
+    ]);
 }
 
 /**
  * POST /api/integrations/payments/card
- * Save a card for future payments
+ * Store card token metadata for Interswitch-backed payment reuse
  */
 function saveCard() {
     global $data;
@@ -396,13 +443,14 @@ function saveCard() {
     };
     
     // Generate card token
-    $token = 'card_' . strtolower(bin2hex(random_bytes(16)));
+    $token = 'isw_card_' . strtolower(bin2hex(random_bytes(16)));
     
     $response = [
         'token' => $token,
         'last4' => substr($cardNumber, -4),
         'type' => $cardType,
         'expiry' => sprintf('%02d/%02d', $expiryMonth, $expiryYear),
+        'provider' => 'interswitch',
         'created_at' => date('c')
     ];
     
@@ -464,56 +512,49 @@ function verifyBankAccount() {
         errorResponse('Account number must be 10 digits');
     }
     
-    // Nigerian bank codes (sample)
-    $bankCodes = [
-        '044' => 'Access Bank',
-        '023' => 'Citi Bank',
-        '063' => 'Diamond Bank',
-        '215' => 'Ecobank',
-        '050' => 'EcoBank',
-        '070' => 'Fidelity Bank',
-        '011' => 'First Bank',
-        '058' => 'Guaranty Trust Bank (GTBank)',
-        '030' => 'Heritage Bank',
-        '082' => 'Keystone Bank',
-        '014' => 'Providus Bank',
-        '076' => 'Skye Bank',
-        '101' => 'Stanbic IBTC Bank',
-        '068' => 'Sterling Bank',
-        '032' => 'Union Bank',
-        '020' => 'United Bank for Africa (UBA)',
-        '033' => 'United Bank for Africa (UBA)',
-        '035' => 'Wema Bank',
-        '057' => 'Zenith Bank'
+    $payload = [
+        'terminalId' => INTERSWITCH_TERMINAL_ID,
+        'bankCode' => $bankCode,
+        'accountNumber' => $accountNumber,
     ];
-    
-    if (!isset($bankCodes[$bankCode])) {
-        errorResponse('Invalid bank code');
+
+    $response = interswitchAuthorizedJsonRequest(
+        'POST',
+        INTERSWITCH_API_BASE_URL . '/purchases/validations/accounts',
+        $payload
+    );
+
+    if (!$response['success']) {
+        errorResponse('Bank account verification failed with Interswitch', 502);
     }
-    
-    // Mock account verification
-    // In production, call Nigerian bank verification API
-    $hash = crc32($bankCode . $accountNumber);
-    $isValid = $hash % 5 !== 0; // 80% success rate
-    
-    if ($isValid) {
-        // Generate mock account name
-        $names = ['John Doe', 'Jane Smith', 'Michael Johnson', 'Sarah Williams', 'David Brown'];
-        $accountName = $names[$hash % count($names)];
-        
-        $response = [
-            'bank_code' => $bankCode,
-            'bank_name' => $bankCodes[$bankCode],
-            'account_number' => $accountNumber,
-            'account_name' => $accountName,
-            'verified' => true,
-            'verified_at' => date('c')
-        ];
-        
-        successResponse('Bank account verified', $response);
-    } else {
-        errorResponse('Could not verify account details');
-    }
+
+    $result = is_array($response['data']) ? $response['data'] : [];
+
+    successResponse('Bank account verified', [
+        'provider' => 'interswitch',
+        'bank_code' => $bankCode,
+        'bank_name' => $result['bankName'] ?? null,
+        'account_number' => $accountNumber,
+        'account_name' => $result['accountName'] ?? null,
+        'verified' => (bool)($result['valid'] ?? true),
+        'verified_at' => date('c'),
+        'gateway_response' => $result,
+    ]);
+}
+
+/**
+ * GET /api/integrations/payments/callback
+ */
+function handlePaymentCallback() {
+    $reference = sanitizeInput($_GET['txnref'] ?? $_GET['reference'] ?? '');
+    $status = sanitizeInput($_GET['status'] ?? 'pending');
+
+    successResponse('Interswitch callback received', [
+        'provider' => 'interswitch',
+        'reference' => $reference,
+        'status' => $status,
+        'query' => $_GET,
+    ]);
 }
 
 /**

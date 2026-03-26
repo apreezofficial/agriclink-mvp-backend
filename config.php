@@ -6,6 +6,9 @@
  * for all API endpoints.
  */
 
+// Include CORS headers FIRST
+require_once __DIR__ . '/cors.php';
+
 // Database configuration
 define('DB_HOST', 'localhost');
 define('DB_NAME', 'agri_market');
@@ -15,6 +18,17 @@ define('DB_PASS', '');
 // JWT Configuration
 define('JWT_SECRET', 'xxxxefnefineifnneinfnenn34i');
 define('JWT_EXPIRY', 86400); // 24 hours
+
+// Interswitch Sandbox Configuration
+define('INTERSWITCH_ENV', 'sandbox');
+define('INTERSWITCH_CLIENT_ID', 'IKIA261543BC9D633175EF09604872112B7063B5D1DE');
+define('INTERSWITCH_CLIENT_SECRET', 'E5CF51ED5D92FD75F5ECAEFF14D9537372FC3FAB');
+define('INTERSWITCH_MERCHANT_CODE', 'MX6072');
+define('INTERSWITCH_TERMINAL_ID', '3TLP0001');
+define('INTERSWITCH_REDIRECT_URL', 'https://agrilink.preciousadedokun.com.ng/api/integrations.php/payments/callback');
+define('INTERSWITCH_PAYMENT_BASE_URL', 'https://sandbox.interswitchng.com');
+define('INTERSWITCH_PASSPORT_BASE_URL', 'https://sandbox.interswitchng.com/passport');
+define('INTERSWITCH_API_BASE_URL', 'https://sandbox.interswitchng.com/api/v1');
 
 // API Response Helpers
 function jsonResponse($data, $statusCode = 200) {
@@ -169,6 +183,114 @@ function sanitizeInput($input) {
     return htmlspecialchars(trim($input), ENT_QUOTES, 'UTF-8');
 }
 
+function interswitchConfig() {
+    $resolvedRedirectUrl = INTERSWITCH_REDIRECT_URL ?: (getBaseUrl() . '/integrations.php/payments/callback');
+
+    return [
+        'env' => INTERSWITCH_ENV,
+        'client_id' => INTERSWITCH_CLIENT_ID,
+        'client_secret' => INTERSWITCH_CLIENT_SECRET,
+        'merchant_code' => INTERSWITCH_MERCHANT_CODE,
+        'terminal_id' => INTERSWITCH_TERMINAL_ID,
+        'redirect_url' => $resolvedRedirectUrl,
+        'payment_base_url' => INTERSWITCH_PAYMENT_BASE_URL,
+        'passport_base_url' => INTERSWITCH_PASSPORT_BASE_URL,
+        'api_base_url' => INTERSWITCH_API_BASE_URL,
+    ];
+}
+
+function interswitchHttpRequest($method, $url, $headers = [], $body = null) {
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, strtoupper($method));
+    curl_setopt($ch, CURLOPT_TIMEOUT, 45);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+
+    if ($body !== null) {
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
+    }
+
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlError = curl_error($ch);
+    curl_close($ch);
+
+    if ($response === false) {
+        return [
+            'success' => false,
+            'status' => $httpCode ?: 500,
+            'error' => $curlError ?: 'Unknown cURL error',
+            'data' => null,
+        ];
+    }
+
+    $decoded = json_decode($response, true);
+
+    return [
+        'success' => $httpCode >= 200 && $httpCode < 300,
+        'status' => $httpCode,
+        'error' => null,
+        'data' => $decoded ?? $response,
+    ];
+}
+
+function getInterswitchAccessToken() {
+    $config = interswitchConfig();
+    static $cachedToken = null;
+
+    if ($cachedToken && ($cachedToken['expires_at'] ?? 0) > time() + 60) {
+        return $cachedToken['token'];
+    }
+
+    $credentials = base64_encode($config['client_id'] . ':' . $config['client_secret']);
+    $response = interswitchHttpRequest(
+        'POST',
+        $config['passport_base_url'] . '/oauth/token',
+        [
+            'Authorization: Basic ' . $credentials,
+            'Content-Type: application/x-www-form-urlencoded',
+            'Accept: application/json',
+        ],
+        http_build_query(['grant_type' => 'client_credentials'])
+    );
+
+    if (!$response['success'] || !is_array($response['data'])) {
+        $details = is_array($response['data']) ? $response['data'] : ['raw' => $response['data'], 'status' => $response['status'] ?? null, 'error' => $response['error'] ?? null];
+        errorResponse('Unable to authenticate with Interswitch: ' . json_encode($details), 502);
+    }
+
+    $token = $response['data']['access_token'] ?? null;
+    $expiresIn = (int)($response['data']['expires_in'] ?? 3600);
+
+    if (!$token) {
+        errorResponse('Invalid Interswitch token response: ' . json_encode($response['data']), 502);
+    }
+
+    $cachedToken = [
+        'token' => $token,
+        'expires_at' => time() + $expiresIn,
+    ];
+
+    return $token;
+}
+
+function interswitchAuthorizedJsonRequest($method, $url, $payload = null, $extraHeaders = []) {
+    $token = getInterswitchAccessToken();
+    $headers = array_merge([
+        'Authorization: Bearer ' . $token,
+        'Content-Type: application/json',
+        'Accept: application/json',
+    ], $extraHeaders);
+
+    return interswitchHttpRequest(
+        $method,
+        $url,
+        $headers,
+        $payload !== null ? json_encode($payload) : null
+    );
+}
+
 // Pagination
 function paginate($page, $perPage) {
     $page = max(1, (int)$page);
@@ -185,10 +307,20 @@ function paginate($page, $perPage) {
 // CORS Headers
 function setCorsHeaders() {
     header('Access-Control-Allow-Origin: *');
-    header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
-    header('Access-Control-Allow-Headers: Content-Type, Authorization');
+    header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS');
+    header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept, Origin');
+    header('Access-Control-Expose-Headers: Content-Type, Authorization');
+    header('Access-Control-Max-Age: 86400');
     header('Content-Type: application/json');
 }
+
+// CORS Headers - Set these FIRST before any output
+header('Access-Control-Allow-Origin: *');
+header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS');
+header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With, Accept, Origin');
+header('Access-Control-Expose-Headers: Content-Type, Authorization');
+header('Access-Control-Max-Age: 86400');
+header('Content-Type: application/json');
 
 // Handle preflight requests
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
@@ -197,3 +329,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 setCorsHeaders();
+
+// Activity Logging
+function logActivity($userId, $action, $entityType = null, $entityId = null, $details = null) {
+    $db = Database::getInstance();
+    
+    try {
+        $detailsJson = is_array($details) ? json_encode($details) : $details;
+        $stmt = $db->prepare('INSERT INTO activity_logs (user_id, action, entity_type, entity_id, details, ip_address, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?)');
+        $stmt->execute([
+            $userId,
+            $action,
+            $entityType,
+            $entityId,
+            $detailsJson,
+            $_SERVER['REMOTE_ADDR'] ?? null,
+            $_SERVER['HTTP_USER_AGENT'] ?? null
+        ]);
+    } catch (Exception $e) {
+        // Silently fail - don't break the main operation for logging failures
+        error_log('Activity logging failed: ' . $e->getMessage());
+    }
+}
